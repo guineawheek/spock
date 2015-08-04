@@ -36,7 +36,6 @@ class Slot(object):
     def stacks_with(self, other):
         if self.item_id != other.item_id: return False
         if self.damage != other.damage: return False
-        if self.damage != other.damage: return False
         # raise NotImplementedError('Stacks might differ by NBT data: %s %s' % (self, other))
         # if self.nbt != other.nbt: return False  # TODO implement this correctly
         return self.max_amount != 1
