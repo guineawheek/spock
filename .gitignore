@@ -1,4 +1,14 @@
 *.pyc
 *.log
+*.swp
+packetlog
+config.yaml
 login.py
 run.py
+contrib/
+/dist/
+/build
+/.tox/
+*.egg-info/
+xunit-*.xml
+.coverage

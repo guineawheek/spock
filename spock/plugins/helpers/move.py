@@ -1,33 +1,76 @@
-MOVEMENT_TICK = 0.05
+"""
+MovementPlugin provides a centralized plugin for controlling all outgoing
+position packets so the client doesn't try to pull itself in a dozen directions.
+Also provides very basic pathfinding
+"""
 
-class MovementPlugin:
-	def __init__(self, ploader, settings):
-		self.client = ploader.requires('ClientInfo')
-		self.net = ploader.requires('Net')
-		self.world = ploader.requires('World')
-		self.timer = ploader.requires('Timer')
-		self.timer.reg_event_timer(MOVEMENT_TICK, self.send_update, -1)
-		ploader.reg_event_handler(
-			(0x0A, 0x0B, 0x0C, 0x0D), 
-			self.handle_position_update
-		)
+from spock.utils import pl_announce
+from spock.mcp import mcdata
+from spock.utils import Position
+from spock.plugins.base import PluginBase
+import math
 
-	def send_update(self):
-		self.net.push(mcpacket.Packet(
-			ident = 0x0D, 
-			data = self.client_info.position
-		))
+import logging
+logger = logging.getLogger('spock')
 
-	#Position Update Packets - Reflect new position back to server
-	#Clearly something very wrong with this, but no "good" solution
-	#jumps to mind. Rework it later
-	def handle_position_update(self, name, packet):
-		if packet.direction == mcdata.SERVER_TO_CLIENT:
-			position = self.client_info.position
-			for key, value in packet.data.items():
-				position[key] = value
-			self.net.push(mcpacket.Packet(
-				ident = 0x0D, 
-				data = position
-			))
-		
+class MovementCore:
+    def __init__(self):
+        self.move_location = None
+    def move_to(self, x, y, z):
+        self.move_location = Position(x, y, z)
+
+@pl_announce('Movement')
+class MovementPlugin(PluginBase):
+    requires = ('Net', 'Physics', 'ClientInfo')
+    events = {
+        'client_tick': 'client_tick',
+        'action_tick': 'action_tick',
+        'cl_position_update': 'handle_position_update',
+        'phy_collision': 'handle_collision',
+    }
+    def __init__(self, ploader, settings):
+        super(self.__class__, self).__init__(ploader, settings)
+
+        self.movement = MovementCore()
+        ploader.provides('Movement', self.movement)
+
+    def client_tick(self, name, data):
+        self.net.push_packet('PLAY>Player Position', self.clientinfo.position.get_dict())
+
+    def handle_position_update(self, name, data):
+        self.net.push_packet('PLAY>Player Position and Look', data.get_dict())
+
+    def handle_collision(self, name, data):
+        if self.movement.move_location != None:
+            self.physics.jump()
+
+    def action_tick(self, name, data):
+        self.do_pathfinding()
+
+    def do_pathfinding(self):
+        if self.movement.move_location != None:
+            if self.movement.move_location.x == math.floor(self.clientinfo.position.x) and self.movement.move_location.z == math.floor(self.clientinfo.position.z):
+                self.movement.move_location = None;
+            else:
+                dx = self.movement.move_location.x - self.clientinfo.position.x
+                dz = self.movement.move_location.z - self.clientinfo.position.z
+                deg = 0
+                if abs(dx) >= abs(dz):
+                    #we should go along x
+                    if dx > 0:
+                        #go positive x
+                        deg = 90
+                    else:
+                        #go neg x
+                        deg = 270
+
+                elif abs(dx) < abs(dz):
+                    #we should go along z
+                    if dz > 0:
+                        #go positive z
+                        deg = 0
+                    else:
+                        #go neg z
+                        deg = 180
+
+                self.physics.walk(deg)

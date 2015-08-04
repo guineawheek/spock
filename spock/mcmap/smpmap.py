@@ -1,4 +1,5 @@
 """
+Used for storing map data
 
 Chunks are packed in X, Z, Y order
 The array walks down X, every 16 elements you enter a new Z-level
@@ -13,222 +14,255 @@ ex.
 [256]-[511] are X = 0-15, Z = 0-15, Y = 1
 and so on
 
-Chunk Coords * 16 + Block Coords gives you the actual position of the block in the world
-
 """
 
 import array
 import struct
 from spock import utils
 
-class BiomeData:
-	""" A 16x16 array stored in each ChunkColumn. """
-	data = None
-	
-	def fill(self):
-		if not self.data:
-			self.data = array.array('B', [0]*256)
-	
-	def unpack(self, buff):
-		self.data = array.array('B', buff.read(256))
-	
-	def pack(self):
-		return self.data.tostring()
-	
-	def get(self, x, z):
-		self.fill()
-		return self.data[x + z * 16]
-	
-	def put(self, x, z, d):
-		self.fill()
-		self.data[x + z * 16] = d
-
+DIMENSION_NETHER   = -0x01
+DIMENSION_OVERWOLD =  0x00
+DIMENSION_END      =  0x01
 
 class ChunkData:
-	""" A 16x16x16 array for storing block IDs. """
-	length = 16*16*16
-	data   = None
-	
-	def fill(self):
-		if not self.data:
-			self.data = array.array('B', [0]*self.length)
-	
-	def unpack(self, buff):
-		self.data = array.array('B', buff.read(self.length))
-	
-	def pack(self):
-		self.fill()
-		return self.data.tostring()
-	
-	def get(self, x, y, z):
-		self.fill()
-		return self.data[x + ((y * 16) + z) * 16]
-	
-	def put(self, x, y, z, data):
-		self.fill()
-		self.data[x + ((y * 16) + z) * 16] = data
+    length = 16*16*16
+    ty = 'B'
+    data   = None
 
+    def fill(self):
+        if not self.data:
+            self.data = array.array(self.ty, [0]*self.length)
+
+    def unpack(self, buff):
+        self.data = array.array(self.ty, buff.read(self.length))
+
+    def pack(self):
+        self.fill()
+        return self.data.tobytes()
+
+    def get(self, x, y, z):
+        self.fill()
+        return self.data[x + ((y * 16) + z) * 16]
+
+    def set(self, x, y, z, data):
+        self.fill()
+        self.data[x + ((y * 16) + z) * 16] = data
+
+class BiomeData(ChunkData):
+    """ A 16x16 array stored in each ChunkColumn. """
+    length = 16*16
+    data = None
+
+    def get(self, x, z):
+        self.fill()
+        return self.data[x + z * 16]
+
+    def set(self, x, z, d):
+        self.fill()
+        self.data[x + z * 16] = d
+
+class ChunkDataShort(ChunkData):
+    """ A 16x16x16 array for storing block IDs/Metadata. """
+    length = 16*16*16*2
+    ty = 'H'
 
 class ChunkDataNibble(ChunkData):
-	""" A 16x16x8 array for storing metadata, light or add. Each array element
-	contains two 4-bit elements. """
-	length = 16*16*8
-	
-	def get(self, x, y, z):
-		self.fill()
-		x, r = divmod(x, 2)
-		i = x + ((y * 16) + z) * 16
+    """ A 16x16x8 array for storing metadata, light or add. Each array element
+    contains two 4-bit elements. """
+    length = 16*16*8
 
-		if r == 0:
-			return self.data[i] >> 4
-		else:
-			return self.data[i] & 0x0F
+    def get(self, x, y, z):
+        self.fill()
+        x, r = divmod(x, 2)
+        i = x + ((y * 16) + z) * 16
+        if r:
+            return self.data[i] & 0x0F
+        else:
+            return self.data[i] >> 4
 
-	def put(self, x, y, z, data):
-		self.fill()
-		x, r = divmod(x, 2)
-		i = x + ((y * 16) + z) * 16
-		
-		if r == 0:
-			self.data[i] = (self.data[i] & 0x0F) | ((data & 0x0F) << 4)
-		else:
-			self.data[i] = (self.data[i] & 0xF0) | (data & 0x0F)
+    def set(self, x, y, z, data):
+        self.fill()
+        x, r = divmod(x, 2)
+        i = x + ((y * 16) + z) * 16
+        if r:
+            self.data[i] = (self.data[i] & 0xF0) | (data & 0x0F)
+        else:
+            self.data[i] = (self.data[i] & 0x0F) | ((data & 0x0F) << 4)
 
-
-class Chunk(dict):
-	""" Collates the various data arrays """
-	
-	def __init__(self):
-		self['block_data']  = ChunkData()
-		self['block_meta']  = ChunkDataNibble()
-		self['block_add']   = ChunkDataNibble()
-		self['light_block'] = ChunkDataNibble()
-		self['light_sky']   = ChunkDataNibble()
+class Chunk:
+    def __init__(self):
+        self.block_data = ChunkDataShort()
+        self.light_block = ChunkDataNibble()
+        self.light_sky = ChunkDataNibble()
 
 
 class ChunkColumn:
-	""" Initialised chunks are a Chunk, otherwise None. """
-	
-	def __init__(self):
-		self.chunks = [None]*16
-		self.biome  = BiomeData()
-	
-	def unpack(self, buff, mask1, mask2, skylight=True, ground_up=True):
-		#In the protocol, each section is packed sequentially (i.e. attributes
-		#pertaining to the same chunk are *not* grouped)
-		self.unpack_section(buff, 'block_data',  mask1)
-		self.unpack_section(buff, 'block_meta',  mask1)
-		self.unpack_section(buff, 'light_block', mask1)
-		if skylight:
-			self.unpack_section(buff, 'light_sky', mask1)
-		self.unpack_section(buff, 'block_add',   mask2)
-		if ground_up:
-			self.biome.unpack(buff)
-		
-	def unpack_section(self, buff, section, mask):
-		#Iterate over the bitmask
-		for i in range(16):
-			if mask & (1 << i):
-				if self.chunks[i] == None:
-					self.chunks[i] = Chunk()
-				self.chunks[i][section].unpack(buff)
+    def __init__(self):
+        self.chunks = [None]*16
+        self.biome = BiomeData()
 
-class World:
-	""" A bunch of ChunkColumns. """
-	
-	def __init__(self):
-		self.columns = {} #chunk columns are address by a tuple (x, z)
-	
-	def unpack_raw(self, buff, ty):
-		return struct.unpack('>'+ty, buff.read(struct.calcsize(ty)))
-	
-	def unpack_bulk(self, data):
-		skylight = data['sky_light']
-		ground_up = True
-		
-		# Read compressed data
-		data = utils.BoundBuffer(data['data'])
-		
-		for bitmap in data['bitmaps']:
-			# Read chunk metadata
-			x_chunk = bitmap['x']
-			z_chunk = bitmap['z']
-			mask1 = bitmap['primary_bitmap']
-			mask2 = bitmap['secondary_bitmap']
-			
-			# Grab the relevant column
-			key = (x_chunk, z_chunk)
-			if key not in self.columns:
-				self.columns[key] = ChunkColumn()
-			
-			# Unpack the chunk column data
-			self.columns[key].unpack(data, mask1, mask2, skylight, ground_up)
+    def unpack(self, buff, mask, skylight=True, continuous=True):
+        #In the protocol, each section is packed sequentially (i.e. attributes
+        #pertaining to the same chunk are *not* grouped)
+        self.unpack_block_data(buff, mask)
+        self.unpack_light_block(buff, mask)
+        if skylight:
+            self.unpack_light_sky(buff, mask)
+        if continuous:
+            self.biome.unpack(buff)
 
-	def unpack_column(self, data):
-		x_chunk = data['x_chunk']
-		z_chunk = data['z_chunk']
-		ground_up = data['ground_up_continuous']
-		mask1 = data['primary_bitmap']
-		mask2 = data['secondary_bitmap']
-		data = BoundBuffer(data['data'])
-		skylight = True
+    def unpack_block_data(self, buff, mask):
+        for i in range(16):
+            if mask&(1<<i):
+                if self.chunks[i] == None:
+                    self.chunks[i] = Chunk()
+                self.chunks[i].block_data.unpack(buff)
 
-		key = (x_chunk, z_chunk)
-		if key not in self.columns:
-			self.columns[key] = ChunkColumn()
+    def unpack_light_block(self, buff, mask):
+        for i in range(16):
+            if mask&(1<<i):
+                if self.chunks[i] == None:
+                    self.chunks[i] = Chunk()
+                self.chunks[i].light_block.unpack(buff)
 
-		self.columns[key].unpack(data, mask1, mask2, skylight, ground_up)
-	
-	def get(self, x, y, z, key):
-		x, rx = divmod(x, 16)
-		y, ry = divmod(y, 16)
-		z, rz = divmod(z, 16)
-		
-		if not (x,z) in self.columns:
-			return 0
-		column = self.columns[(x,z)]
-		
-		chunk = column.chunks[y]
-		if chunk == None:
-			return 0
-		
-		return chunk[key].get(rx,ry,rz)
-	
-	def put(self, x, y, z, key, data):
-		x, rx = divmod(x, 16)
-		y, ry = divmod(y, 16)
-		z, rz = divmod(z, 16)
-		
-		if (x,z) in self.columns:
-			column = self.columns[(x,z)]
-		else:
-			column = ChunkColumn()
-			self.columns[(x,z)] = column
-		
-		chunk = column.chunks[y]
-		if chunk == None:
-			chunk = Chunk()
-			column.chunks[y] = chunk
-		
-		chunk[key].put(rx,ry,rz,data)
-	
-	def get_biome(self, x, z):
-		x, rx = divmod(x, 16)
-		z, rz = divmod(z, 16)
-		
-		if (x,z) not in self.columns:
-			return 0
-		
-		return self.columns[(x,z)].biome.get(rx, rz)
-	
-	def set_biome(self, x, z, data):
-		x, rx = divmod(x, 16)
-		z, rz = divmod(z, 16)
-		
-		if (x,z) in self.columns:
-			column = self.columns[(x,z)]
-		else:
-			column = ChunkColumn()
-			self.columns[(x,z)] = column
-		
-		return column.biome.put(rx, rz, data)
+    def unpack_light_sky(self, buff, mask):
+        for i in range(16):
+            if mask&(1<<i):
+                if self.chunks[i] == None:
+                    self.chunks[i] = Chunk()
+                self.chunks[i].light_sky.unpack(buff)
+
+class Dimension(object):
+    """ A bunch of ChunkColumns. """
+
+    def __init__(self, dimension):
+        self.dimension = dimension
+        self.columns = {} #chunk columns are address by a tuple (x, z)
+
+    def unpack_bulk(self, data):
+        skylight = data['sky_light']
+        bbuff = utils.BoundBuffer(data['data'])
+        for meta in data['metadata']:
+            # Read chunk metadata
+            x_chunk = meta['chunk_x']
+            z_chunk = meta['chunk_z']
+            mask = meta['primary_bitmap']
+
+            # Grab the relevant column
+            key = (x_chunk, z_chunk)
+            if key not in self.columns:
+                self.columns[key] = ChunkColumn()
+
+            # Unpack the chunk column data
+            self.columns[key].unpack(bbuff, mask, skylight)
+
+    def unpack_column(self, data):
+        x_chunk = data['chunk_x']
+        z_chunk = data['chunk_z']
+        mask = data['primary_bitmap']
+        continuous = data['continuous']
+        bbuff = utils.BoundBuffer(data['data'])
+        if self.dimension == DIMENSION_OVERWOLD:
+            skylight = True
+        else:
+            skylight = False
+
+        key = (x_chunk, z_chunk)
+        if key not in self.columns:
+            self.columns[key] = ChunkColumn()
+
+        self.columns[key].unpack(bbuff, mask, skylight, continuous)
+
+    def get_block(self, x, y, z):
+        x, y, z = int(x), int(y), int(z) #Damn you python2
+        x, rx = divmod(x, 16)
+        y, ry = divmod(y, 16)
+        z, rz = divmod(z, 16)
+
+        if (x, z) not in self.columns or y > 0x0F:
+            return 0, 0
+        column = self.columns[(x,z)]
+        chunk = column.chunks[y]
+        if chunk == None:
+            return 0, 0
+
+        data = chunk.block_data.get(rx,ry,rz)
+        return data>>4, data&0x0F
+
+    def set_block(self, x, y, z, block_id = None, meta = None, data = None):
+        x, rx = divmod(x, 16)
+        y, ry = divmod(y, 16)
+        z, rz = divmod(z, 16)
+
+        if y > 0x0F:
+            return
+        if (x,z) in self.columns:
+            column = self.columns[(x,z)]
+        else:
+            column = ChunkColumn()
+            self.columns[(x,z)] = column
+        chunk = column.chunks[y]
+        if chunk == None:
+            chunk = Chunk()
+            column.chunks[y] = chunk
+
+        if data == None:
+            data = (block_id<<4)|(meta&0x0F)
+        chunk.block_data.set(rx, ry, rz, data)
+
+    def get_light(self, x, y, z):
+        x, rx = divmod(x, 16)
+        y, ry = divmod(y, 16)
+        z, rz = divmod(z, 16)
+
+        if (x, z) not in self.columns or y > 0x0F:
+            return 0, 0
+        column = self.columns[(x,z)]
+        chunk = column.chunks[y]
+        if chunk == None:
+            return 0, 0
+
+        return chunk.light_block.get(rx,ry,rz), chunk.light_sky.get(rx,ry,rz)
+
+    def set_light(self, x, y, z, light_block = None, light_sky = None):
+        x, rx = divmod(x, 16)
+        y, ry = divmod(y, 16)
+        z, rz = divmod(z, 16)
+
+        if y > 0x0F:
+            return
+        if (x,z) in self.columns:
+            column = self.columns[(x, z)]
+        else:
+            column = ChunkColumn()
+            self.columns[(x, z)] = column
+        chunk = column.chunks[y]
+        if chunk == None:
+            chunk = Chunk()
+            column.chunks[y] = chunk
+
+        if light_block != None:
+            chunk.light_block.set(rx, ry, rz, light_block&0xF)
+        if light_sky != None:
+            chunk.light_sky.set(rx, ry, rz, light_sky&0xF)
+
+    def get_biome(self, x, z):
+        x, rx = divmod(x, 16)
+        z, rz = divmod(z, 16)
+
+        if (x,z) not in self.columns:
+            return 0
+
+        return self.columns[(x,z)].biome.get(rx, rz)
+
+    def set_biome(self, x, z, data):
+        x, rx = divmod(x, 16)
+        z, rz = divmod(z, 16)
+
+        if (x,z) in self.columns:
+            column = self.columns[(x,z)]
+        else:
+            column = ChunkColumn()
+            self.columns[(x,z)] = column
+
+        return column.biome.set(rx, rz, data)
